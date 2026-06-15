@@ -224,6 +224,8 @@
   .ring-c b{font-family:var(--en);font-size:44px;font-weight:700;line-height:1;color:var(--blue-deep)}
   .ring-c span{font-size:13px;color:var(--muted)}
   .cheer-msg{font-family:var(--en);font-size:21px;font-weight:600;margin:14px 0 4px;color:var(--teal-deep)}
+  .sent-note{margin:10px auto 0;font-size:13.5px;color:var(--ok);background:var(--ok-soft);border:1.5px solid var(--ok);
+    border-radius:999px;padding:7px 16px;display:inline-block;font-family:var(--zh)}
   .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;margin-top:20px}
   .stat{background:#fffaf0;border:2px solid var(--line);border-radius:16px;padding:16px 6px}
   .stat b{display:block;font-family:var(--en);font-size:27px;font-weight:700}
@@ -419,6 +421,7 @@
       <div class="stat bad"><b id="rWrong">0</b><span>答錯</span></div>
       <div class="stat acc"><b id="rRate">0%</b><span>正確率</span></div>
     </div>
+    <div class="sent-note hidden" id="sentNote">📤 成績已自動回報給老師</div>
     <div class="rbtns">
       <button id="reviewBtn">看看詳解 🔍</button>
       <button class="primary" id="retryBtn">再玩一次 🔁</button>
@@ -435,6 +438,21 @@
 const BANK_URL = "question_bank.json";
 const KEY_URL  = "answer_key.json";
 /* ====================================================== */
+
+/* ===== Google 表單回報（交卷後自動送出，學生看不到跳轉） =====
+   欄位順序請對照你的表單： 姓名 / 練習範圍 / 總題數 / 答對 / 答錯 / 正確率 */
+const GFORM = {
+  id: "1FAIpQLSfju9Xa-AhLL2ud6hgNgvB7Gy7KAO093X-QD0upvQmZiqTlFg",
+  fields: {
+    name:    "entry.662434911",   // 姓名
+    range:   "entry.1659652276",  // 練習範圍
+    total:   "entry.598168858",   // 總題數
+    correct: "entry.712365643",   // 答對
+    wrong:   "entry.861464449",   // 答錯
+    rate:    "entry.1814955045"   // 正確率
+  }
+};
+/* ============================================================ */
 
 const SKEY = "jhe_quiz_v3";
 const TEACHER_PW = "123456";
@@ -628,6 +646,16 @@ function setupPicker(){
 }
 
 /* ---------- build session ---------- */
+function makeRangeLabel(sel){
+  let r=0,c=0;
+  S.bank.forEach(q=>{ if(sel.ids.has(q.id)){ q.section==="閱讀測驗"?r++:c++; } });
+  const parts=[]; if(r)parts.push("閱讀"+r+"題"); if(c)parts.push("克漏字"+c+"題");
+  let base=parts.join("、")||"無";
+  if(sel.mode==="wrong") base="只練錯題（"+base+"）";
+  else if(sel.mode==="random") base="隨機（"+base+"）";
+  const ex=currentExam(); if(ex!=="all") base="卷"+ex+" "+base;
+  return base;
+}
 function buildGroups(){
   const ids=S.sessionIds instanceof Set ? S.sessionIds : new Set(S.sessionIds||[]);
   const pool=S.bank.filter(q=>ids.has(q.id));
@@ -754,6 +782,8 @@ $("#startBtn").addEventListener("click",()=>{
   const sel=computeSelection();
   if(sel.ids.size===0){ updateSummary(); $("#summary").scrollIntoView({behavior:"smooth",block:"center"}); return; }
   S.sessionIds=sel.ids;
+  S.rangeLabel=makeRangeLabel(sel);
+  S.formSent=false;
   S.answers={}; S.idx=0; S.submitted=false; S.review=false;
   buildGroups(); buildJump(); showWho();
   $("#start").classList.add("hidden"); $("#result").classList.add("hidden");
@@ -789,7 +819,30 @@ function doSubmit(){
   const wrong=[];
   for(const g of S.groups) for(const q of g.questions) if(S.answers[q.id]!==S.key[q.id]) wrong.push(q.id);
   addWrongIds(wrong);
+  // 自動回報老師（Google 表單，靜默送出）
+  if(!S.formSent){ const sc=computeScore(); reportToTeacher(sc); S.formSent=true; }
   save(); showResult(false);
+}
+function computeScore(){
+  let correct=0;
+  for(const g of S.groups) for(const q of g.questions) if(S.answers[q.id]===S.key[q.id]) correct++;
+  const total=S.total, wrong=total-correct, rate=total?Math.round(correct/total*100):0;
+  return {total,correct,wrong,rate};
+}
+function reportToTeacher(sc){
+  if(!GFORM.id) return false;
+  try{
+    const fd=new FormData();
+    fd.append(GFORM.fields.name,    S.student.name||"");
+    fd.append(GFORM.fields.range,   S.rangeLabel||"");
+    fd.append(GFORM.fields.total,   String(sc.total));
+    fd.append(GFORM.fields.correct, String(sc.correct));
+    fd.append(GFORM.fields.wrong,   String(sc.wrong));
+    fd.append(GFORM.fields.rate,    sc.rate+"%");
+    fetch("https://docs.google.com/forms/d/e/"+GFORM.id+"/formResponse",
+          {method:"POST",mode:"no-cors",body:fd});
+    return true;
+  }catch(e){ return false; }
 }
 function cheerFor(rate){
   if(rate>=90) return {emoji:"🏆",msg:"太厲害了！繼續保持！"};
@@ -806,6 +859,7 @@ function showResult(skipAnim){
   $("#rWrong").textContent=wrong; $("#rRate").textContent=rate+"%";
   const cf=cheerFor(rate);
   $("#congratsEmoji").textContent=cf.emoji; $("#cheerMsg").textContent=cf.msg;
+  $("#sentNote").classList.toggle("hidden", !(S.formSent && GFORM.id));
   $("#quiz").classList.add("hidden"); $("#start").classList.add("hidden");
   $("#result").classList.remove("hidden"); $("#submitBtn").classList.add("hidden");
   const ring=$("#ring"), C=465, off=C-C*rate/100;
